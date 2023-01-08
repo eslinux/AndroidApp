@@ -40,6 +40,9 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class ScreenCaptureService extends Service {
     private static final String TAG = "ScreenCaptureService";
@@ -47,16 +50,19 @@ public class ScreenCaptureService extends Service {
     private static final int CMD_START_RECORD = 0;
     private static final int CMD_STOP_RECORD = 1;
 
-    private ServiceHandler mHandler;
+    private ServiceHandler mServiceHandler;
     private Handler mEncoderHandler = null;
-    private Intent mProjData;
+    private Intent mProjData = null;
     private boolean mIsEnableGetFrame = false;
 
-    public ScreenCaptureService() {
-        HandlerThread thread = new HandlerThread("test_record_screen_thread");
-        thread.start();
-        mHandler = new ServiceHandler(thread.getLooper(), this);
+    private ScheduledExecutorService mFrameRenderExecutor = null;
 
+    public ScreenCaptureService() {
+//        HandlerThread thread = new HandlerThread("test_record_screen_thread");
+//        thread.start();
+//        mServiceHandler = new ServiceHandler(thread.getLooper(), this);
+        mFrameRenderExecutor =  Executors.newScheduledThreadPool(1);
+        mServiceHandler = new ServiceHandler(this);
         mEncoderHandler = getEncoderHandler();
     }
 
@@ -69,24 +75,52 @@ public class ScreenCaptureService extends Service {
             case "start": {
                 if (!mIsEnableGetFrame) {
                     mIsEnableGetFrame = true;
-
                     mProjData = intent.getParcelableExtra("com.ns.pData");
-                    Message m = mHandler.obtainMessage();
-                    m.what = CMD_START_RECORD;
-                    mHandler.sendMessage(m);
+//                    Message m = mServiceHandler.obtainMessage();
+//                    m.what = CMD_START_RECORD;
+//                    mServiceHandler.sendMessage(m);
+
+                    mFrameRenderExecutor.scheduleAtFixedRate(() -> {
+                        renderFrame();
+                    }, 0, 1000 / 30, TimeUnit.MILLISECONDS);
                 }
             }
             break;
             case "stop": {
-//                Message m = mHandler.obtainMessage();
+//                Message m = mServiceHandler.obtainMessage();
 //                m.what = CMD_STOP_RECORD;
-//                mHandler.sendMessage(m);
-                mIsEnableGetFrame = false;
+//                mServiceHandler.sendMessage(m);
+                if (mIsEnableGetFrame) {
+                    mIsEnableGetFrame = false;
+                    while (mServiceHandler.isPrepare()) {
+                        try {
+                            Thread.sleep(1000 / 30);
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
+                        }
+                    }
+                    mFrameRenderExecutor.shutdown();
+                }
             }
             break;
         }
 
         return START_NOT_STICKY;
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        // TODO: Return the communication channel to the service.
+        throw new UnsupportedOperationException("Not yet implemented");
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        mIsEnableGetFrame = false;
+        mServiceHandler = null;
+        mEncoderHandler = null;
+        mProjData = null;
     }
 
     private void sendNotification(String msg) {
@@ -110,22 +144,18 @@ public class ScreenCaptureService extends Service {
         return new Handler(t.getLooper());
     }
 
-    @Override
-    public IBinder onBind(Intent intent) {
-        // TODO: Return the communication channel to the service.
-        throw new UnsupportedOperationException("Not yet implemented");
+    private void renderFrame() {
+        if (mIsEnableGetFrame) {
+            if (!mServiceHandler.isPrepare()) {
+                mServiceHandler.startCapture();
+            }
+            mServiceHandler.getFrame();
+        } else {
+            mServiceHandler.stopCapture();
+        }
     }
 
-    @Override
-    public void onDestroy() {
-        super.onDestroy();
-        mIsEnableGetFrame = false;
-        mHandler = null;
-        mEncoderHandler = null;
-        mProjData = null;
-    }
-
-    private static class ServiceHandler extends Handler {
+    private static class ServiceHandler {
 
         private static final int mGetFrameDelay = 1000 / 30; //ms
         private MediaCodec mEncoder;
@@ -134,46 +164,23 @@ public class ScreenCaptureService extends Service {
         private ImageReader mImageReader;
 
         private VirtualDisplay mVirtualDisplay;
-        private final String mVideoURL = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getAbsolutePath()
-                + File.separator + "Recorder_Video.mp4";
+        private final String mVideoURL = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getAbsolutePath() + File.separator + "recorder.mp4";
 
+        private boolean mIsPrepare = false;
         private boolean mIsRecording = false;
-//        private ScreenCaptureService mScreenCaptureService = null;
+        private ScreenCaptureService mScreenCaptureService = null;
 
         private boolean mIsPrepareOpengl = false;
         private InputSurface mCodecInputSurface;
         private TextureRenderer mTexRenderer;
 
-        private final WeakReference<ScreenCaptureService> mScreenCaptureService;
-
-
-        public ServiceHandler(@NonNull Looper looper, ScreenCaptureService s) {
-            super(looper);
-            mScreenCaptureService = new WeakReference<>(s);
+        public ServiceHandler(ScreenCaptureService service) {
+            mScreenCaptureService = service;
         }
 
-        @Override
-        public void handleMessage(@NonNull Message msg) {
-            super.handleMessage(msg);
-
-            switch (msg.what) {
-                //start capturing
-                case CMD_START_RECORD:
-                    startCapture();
-                    break;
-                //stop capture
-//                case CMD_STOP_RECORD:
-//                    stopCapture();
-//                    break;
-            }
-        }
-
-        private void startCapture() {
+        public void startCapture() {
             Log.e(TAG, "startCapture");
-            ScreenCaptureService service = mScreenCaptureService.get();
-            if (service == null) {
-                return;
-            }
+
 
             //config media codec encoder
             String mMimeType = MediaFormat.MIMETYPE_VIDEO_AVC;
@@ -220,9 +227,10 @@ public class ScreenCaptureService extends Service {
                         mIsPrepareOpengl = false;
 
                         //stop ScreenCaptureService
-                        service.stopSelf();
+                        mScreenCaptureService.stopSelf();
 
                         mIsRecording = false;
+                        mIsPrepare = false;
                         track = -1;
                         Log.i(TAG, "end of stream: mIsRecording = " + mIsRecording);
                         return;
@@ -258,22 +266,22 @@ public class ScreenCaptureService extends Service {
                         Log.i(TAG, "start record");
                     }
                 }
-            }, service.mEncoderHandler);
+            }, mScreenCaptureService.mEncoderHandler);
 
             DisplayMetrics m = Resources.getSystem().getDisplayMetrics();
             MediaFormat format = MediaFormat.createVideoFormat(mMimeType, m.widthPixels, m.heightPixels);
-            format.setInteger(MediaFormat.KEY_BIT_RATE, 6000000);
+            format.setInteger(MediaFormat.KEY_BIT_RATE, 2000000);
             format.setInteger(MediaFormat.KEY_FRAME_RATE, 30);
-            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2);
+            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
             format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
 
             mEncoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
             Surface inputSurface = mEncoder.createInputSurface();
             mEncoder.start();
-            prepareOpengl(service, inputSurface);
+            prepareOpengl(mScreenCaptureService, inputSurface);
             //config media projection
-            mMediaProj = ((MediaProjectionManager) service.getSystemService(MEDIA_PROJECTION_SERVICE))
-                    .getMediaProjection(-1, service.mProjData);
+            mMediaProj = ((MediaProjectionManager) mScreenCaptureService.getSystemService(MEDIA_PROJECTION_SERVICE))
+                    .getMediaProjection(-1, mScreenCaptureService.mProjData);
             assert mMediaProj != null;
 
             mImageReader = ImageReader.newInstance(m.widthPixels, m.heightPixels, PixelFormat.RGBA_8888, 1);
@@ -285,19 +293,20 @@ public class ScreenCaptureService extends Service {
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                     mImageReader.getSurface(), null, null);
 
-            getFrame(service);
+            mIsPrepare = true;
         }
 
+        public void stopCapture() {
+            Log.i(TAG, "stopCapture ...");
+            if (mEncoder == null) {
+                return;
+            }
+            mEncoder.signalEndOfInputStream();
+        }
 
-//
-//        private void stopCapture() {
-//            Log.i(TAG, "stopCapture ...");
-//            if (mEncoder == null) {
-//                return;
-//            }
-//            mEncoder.signalEndOfInputStream();
-//        }
-
+        public boolean isPrepare() {
+            return mIsPrepare;
+        }
 
         private void prepareOpengl(ScreenCaptureService service, Surface surface) {
             if (mIsPrepareOpengl) return;
@@ -305,51 +314,34 @@ public class ScreenCaptureService extends Service {
 
             //MUST call makeCurrent to force enable opengl context for setup texture render
             mCodecInputSurface.makeCurrent();
-            mTexRenderer = new TextureRenderer(service);
-            mTexRenderer.init();
             DisplayMetrics m = Resources.getSystem().getDisplayMetrics();//set screen size
-            mTexRenderer.createTexture(m.widthPixels, m.heightPixels);
+            mTexRenderer = new TextureRenderer(m.widthPixels, m.heightPixels);
             mCodecInputSurface.setPresentationTime(0);
             mCodecInputSurface.swapBuffers();
             mIsPrepareOpengl = true;
         }
 
-        private void getFrame(ScreenCaptureService service) {
-            Log.e(TAG, "getFrame1  mImageReader = " + mImageReader + ", mVirtualDisplay = " + mVirtualDisplay);
+        private void getFrame() {
+//            Log.e(TAG, "getFrame1  mImageReader = " + mImageReader + ", mVirtualDisplay = " + mVirtualDisplay);
             if (mImageReader == null || mVirtualDisplay == null) {
                 return;
             }
 
-            while (service != null && service.mIsEnableGetFrame) {
-                sleepGetFrame();
-                Image image = mImageReader.acquireLatestImage();
-                if (image == null) {
-                    drawFrame();
-                    continue;
-                }
-
-                drawFrame(image);
-                image.close();
+            Image image = mImageReader.acquireLatestImage();
+            if (image == null) {
+                drawFrame();
+                return;
             }
 
-            mEncoder.signalEndOfInputStream();
-        }
-
-        private void sleepGetFrame() {
-            try {
-                Thread.sleep(mGetFrameDelay);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
+            drawFrame(image);
+            image.close();
         }
 
         Bitmap outputBitmap = null;
+
         private void drawFrame(Image image) {
             if (!mIsPrepareOpengl) return;
             Image.Plane plane = image.getPlanes()[0];
-
-//            Log.e(TAG, "image w/h = " + image.getWidth() + " / " + image.getHeight());
-//            Log.e(TAG, "image w2/h = " + plane.getRowStride() / plane.getPixelStride() + " / " + image.getHeight());
 
             if (outputBitmap == null) {
                 outputBitmap = Bitmap.createBitmap(plane.getRowStride() / plane.getPixelStride(), image.getHeight(), Bitmap.Config.ARGB_8888);
@@ -357,73 +349,68 @@ public class ScreenCaptureService extends Service {
             outputBitmap.copyPixelsFromBuffer(plane.getBuffer());
 
             mCodecInputSurface.makeCurrent();
-            mTexRenderer.updateImage(outputBitmap);
-            mTexRenderer.renderResult(false);
+            mTexRenderer.drawImage(outputBitmap);
             mCodecInputSurface.setPresentationTime(System.nanoTime());
             mCodecInputSurface.swapBuffers();
         }
 
         private void drawFrame() {
-//            Log.e(TAG, "drawFrame mIsPrepareOpengl = " + mIsPrepareOpengl + ", time = " + ptsNs);
             if (!mIsPrepareOpengl || outputBitmap == null) return;
 
             mCodecInputSurface.makeCurrent();
-            mTexRenderer.updateImage(outputBitmap);
-            mTexRenderer.renderResult(false);
+            mTexRenderer.drawImage(outputBitmap);
             mCodecInputSurface.setPresentationTime(System.nanoTime());
             mCodecInputSurface.swapBuffers();
         }
 
-        private byte[] mBmpBytes = null;
-        private ByteBuffer mBmpBuffer = null;
+//        private byte[] mBmpBytes = null;
+//        private ByteBuffer mBmpBuffer = null;
+//        private void drawFrame2(Image image) {
+//            if (!mIsPrepareOpengl) return;
+//            Image.Plane plane = image.getPlanes()[0];
+//
+//            if (mBmpBytes == null) {
+//                mBmpBytes = new byte[image.getHeight() * image.getHeight() * 4];
+//                mBmpBuffer = ByteBuffer.wrap(mBmpBytes);
+//                Log.e(TAG, "create new bitmap buffer capacity = " + mBmpBuffer.capacity()
+//                        + ", limit = " + mBmpBuffer.limit()
+//                        + ", bytes.length = " + mBmpBytes.length);
+//            }
+//
+//            Bitmap outputBitmap = Bitmap.createBitmap(plane.getRowStride() / plane.getPixelStride(), image.getHeight(), Bitmap.Config.ARGB_8888);
+//            outputBitmap.copyPixelsFromBuffer(plane.getBuffer());
+//            outputBitmap.copyPixelsToBuffer(mBmpBuffer);
+//
+//            mCodecInputSurface.makeCurrent();
+//            mTexRenderer.updateImage(mBmpBuffer);
+//            mTexRenderer.renderResult(false);
+//            mCodecInputSurface.setPresentationTime(image.getTimestamp());
+//            mCodecInputSurface.swapBuffers();
+//        }
 
-        private void drawFrame2(Image image) {
-            if (!mIsPrepareOpengl) return;
-            Image.Plane plane = image.getPlanes()[0];
-
-            if (mBmpBytes == null) {
-                mBmpBytes = new byte[image.getHeight() * image.getHeight() * 4];
-                mBmpBuffer = ByteBuffer.wrap(mBmpBytes);
-                Log.e(TAG, "create new bitmap buffer capacity = " + mBmpBuffer.capacity()
-                        + ", limit = " + mBmpBuffer.limit()
-                        + ", bytes.length = " + mBmpBytes.length);
-            }
-
-            Bitmap outputBitmap = Bitmap.createBitmap(plane.getRowStride() / plane.getPixelStride(), image.getHeight(), Bitmap.Config.ARGB_8888);
-            outputBitmap.copyPixelsFromBuffer(plane.getBuffer());
-            outputBitmap.copyPixelsToBuffer(mBmpBuffer);
-
-            mCodecInputSurface.makeCurrent();
-            mTexRenderer.updateImage(mBmpBuffer);
-            mTexRenderer.renderResult(false);
-            mCodecInputSurface.setPresentationTime(image.getTimestamp());
-            mCodecInputSurface.swapBuffers();
-        }
-
-        private int mSaveImageCounter = 0;
-
-        private void saveBitmap(Image image) {
-            //test save 20 images
-            if (mSaveImageCounter > 20) return;
-
-
-            String file_path = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getAbsolutePath()
-                    + File.separator + "capture_" + mSaveImageCounter + ".png";
-
-            try (FileOutputStream out = new FileOutputStream(file_path)) {
-                Image.Plane plane = image.getPlanes()[0];
-                Bitmap outputBitmap = Bitmap.createBitmap(plane.getRowStride() / plane.getPixelStride(), image.getHeight(), Bitmap.Config.ARGB_8888);
-                outputBitmap.copyPixelsFromBuffer(plane.getBuffer());
-                outputBitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
-                outputBitmap.recycle();
-//                Log.i(TAG, "image format: " + image.getFormat());
-//                Log.i(TAG, "save image: " + file_path);
-                mSaveImageCounter++;
-            } catch (IOException e) {
-                e.printStackTrace();
-                Log.e(TAG, "save bitmap failed ..." + e);
-            }
-        }
+//        private int mSaveImageCounter = 0;
+//        private void saveBitmap(Image image) {
+//            //test save 20 images
+//            if (mSaveImageCounter > 20) return;
+//
+//
+//            String file_path = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getAbsolutePath()
+//                    + File.separator + "capture_" + mSaveImageCounter + ".png";
+//
+//            try (FileOutputStream out = new FileOutputStream(file_path)) {
+//                Image.Plane plane = image.getPlanes()[0];
+//                Bitmap outputBitmap = Bitmap.createBitmap(plane.getRowStride() / plane.getPixelStride(), image.getHeight(), Bitmap.Config.ARGB_8888);
+//                outputBitmap.copyPixelsFromBuffer(plane.getBuffer());
+//                outputBitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
+//                outputBitmap.recycle();
+////                Log.i(TAG, "image format: " + image.getFormat());
+////                Log.i(TAG, "save image: " + file_path);
+//                mSaveImageCounter++;
+//            } catch (IOException e) {
+//                e.printStackTrace();
+//                Log.e(TAG, "save bitmap failed ..." + e);
+//            }
+//        }
     }
 
 }

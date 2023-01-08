@@ -90,7 +90,7 @@ public class InputSurface {
         // Configure EGL for recordable and OpenGL ES 2.0.  We want enough RGB bits
         // to minimize artifacts from possible YUV conversion.
         int eglColorSize = useHighBitDepth ? 10 : 8;
-        int eglAlphaSize = useHighBitDepth ? 2 : 0;
+        int eglAlphaSize = useHighBitDepth ? 2 : 8;
         int recordable = useHighBitDepth ? 0 : 1;
         int[] configAttribList = {EGL14.EGL_RED_SIZE, eglColorSize, EGL14.EGL_GREEN_SIZE, eglColorSize, EGL14.EGL_BLUE_SIZE, eglColorSize, EGL14.EGL_ALPHA_SIZE, eglAlphaSize, EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT, EGLExt.EGL_RECORDABLE_ANDROID, recordable, EGL14.EGL_NONE};
         int[] numConfigs = new int[1];
