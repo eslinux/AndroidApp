@@ -7,11 +7,10 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.res.Resources;
-import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
+import android.graphics.SurfaceTexture;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
-import android.media.Image;
 import android.media.ImageReader;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
@@ -23,8 +22,6 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
-import android.os.Looper;
-import android.os.Message;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Surface;
@@ -36,9 +33,7 @@ import com.example.myopenglmediacodec.surface.InputSurface;
 import com.example.myopenglmediacodec.surface.TextureRenderer;
 
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -58,10 +53,7 @@ public class ScreenCaptureService extends Service {
     private ScheduledExecutorService mFrameRenderExecutor = null;
 
     public ScreenCaptureService() {
-//        HandlerThread thread = new HandlerThread("test_record_screen_thread");
-//        thread.start();
-//        mServiceHandler = new ServiceHandler(thread.getLooper(), this);
-        mFrameRenderExecutor =  Executors.newScheduledThreadPool(1);
+        mFrameRenderExecutor = Executors.newScheduledThreadPool(1);
         mServiceHandler = new ServiceHandler(this);
         mEncoderHandler = getEncoderHandler();
     }
@@ -76,9 +68,6 @@ public class ScreenCaptureService extends Service {
                 if (!mIsEnableGetFrame) {
                     mIsEnableGetFrame = true;
                     mProjData = intent.getParcelableExtra("com.ns.pData");
-//                    Message m = mServiceHandler.obtainMessage();
-//                    m.what = CMD_START_RECORD;
-//                    mServiceHandler.sendMessage(m);
 
                     mFrameRenderExecutor.scheduleAtFixedRate(() -> {
                         renderFrame();
@@ -87,9 +76,6 @@ public class ScreenCaptureService extends Service {
             }
             break;
             case "stop": {
-//                Message m = mServiceHandler.obtainMessage();
-//                m.what = CMD_STOP_RECORD;
-//                mServiceHandler.sendMessage(m);
                 if (mIsEnableGetFrame) {
                     mIsEnableGetFrame = false;
                     while (mServiceHandler.isPrepare()) {
@@ -161,7 +147,6 @@ public class ScreenCaptureService extends Service {
         private MediaCodec mEncoder;
         private MediaMuxer mMuxer;
         private MediaProjection mMediaProj;
-        private ImageReader mImageReader;
 
         private VirtualDisplay mVirtualDisplay;
         private final String mVideoURL = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getAbsolutePath() + File.separator + "recorder.mp4";
@@ -284,14 +269,13 @@ public class ScreenCaptureService extends Service {
                     .getMediaProjection(-1, mScreenCaptureService.mProjData);
             assert mMediaProj != null;
 
-            mImageReader = ImageReader.newInstance(m.widthPixels, m.heightPixels, PixelFormat.RGBA_8888, 1);
             mVirtualDisplay = mMediaProj.createVirtualDisplay(
                     "recorderVirtualDisplay",
                     m.widthPixels,
                     m.heightPixels,
                     m.densityDpi,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    mImageReader.getSurface(), null, null);
+                    mTexRenderer.getSurface(), null, null);
 
             mIsPrepare = true;
         }
@@ -310,11 +294,11 @@ public class ScreenCaptureService extends Service {
 
         private void prepareOpengl(ScreenCaptureService service, Surface surface) {
             if (mIsPrepareOpengl) return;
-            mCodecInputSurface = new InputSurface(surface, false, false);
+            mCodecInputSurface = new InputSurface(surface);
+            DisplayMetrics m = Resources.getSystem().getDisplayMetrics();
 
             //MUST call makeCurrent to force enable opengl context for setup texture render
             mCodecInputSurface.makeCurrent();
-            DisplayMetrics m = Resources.getSystem().getDisplayMetrics();//set screen size
             mTexRenderer = new TextureRenderer(m.widthPixels, m.heightPixels);
             mCodecInputSurface.setPresentationTime(0);
             mCodecInputSurface.swapBuffers();
@@ -322,95 +306,22 @@ public class ScreenCaptureService extends Service {
         }
 
         private void getFrame() {
-//            Log.e(TAG, "getFrame1  mImageReader = " + mImageReader + ", mVirtualDisplay = " + mVirtualDisplay);
-            if (mImageReader == null || mVirtualDisplay == null) {
+            if (mVirtualDisplay == null) {
                 return;
             }
 
-            Image image = mImageReader.acquireLatestImage();
-            if (image == null) {
-                drawFrame();
-                return;
-            }
-
-            drawFrame(image);
-            image.close();
-        }
-
-        Bitmap outputBitmap = null;
-
-        private void drawFrame(Image image) {
-            if (!mIsPrepareOpengl) return;
-            Image.Plane plane = image.getPlanes()[0];
-
-            if (outputBitmap == null) {
-                outputBitmap = Bitmap.createBitmap(plane.getRowStride() / plane.getPixelStride(), image.getHeight(), Bitmap.Config.ARGB_8888);
-            }
-            outputBitmap.copyPixelsFromBuffer(plane.getBuffer());
-
-            mCodecInputSurface.makeCurrent();
-            mTexRenderer.drawImage(outputBitmap);
-            mCodecInputSurface.setPresentationTime(System.nanoTime());
-            mCodecInputSurface.swapBuffers();
+            drawFrame();
         }
 
         private void drawFrame() {
-            if (!mIsPrepareOpengl || outputBitmap == null) return;
+            if (!mIsPrepareOpengl) return;
 
             mCodecInputSurface.makeCurrent();
-            mTexRenderer.drawImage(outputBitmap);
-            mCodecInputSurface.setPresentationTime(System.nanoTime());
+            mTexRenderer.updateFrame();
+            mTexRenderer.drawFrame();
+            mCodecInputSurface.setPresentationTime(mTexRenderer.getSurfaceTexture().getTimestamp());
             mCodecInputSurface.swapBuffers();
         }
-
-//        private byte[] mBmpBytes = null;
-//        private ByteBuffer mBmpBuffer = null;
-//        private void drawFrame2(Image image) {
-//            if (!mIsPrepareOpengl) return;
-//            Image.Plane plane = image.getPlanes()[0];
-//
-//            if (mBmpBytes == null) {
-//                mBmpBytes = new byte[image.getHeight() * image.getHeight() * 4];
-//                mBmpBuffer = ByteBuffer.wrap(mBmpBytes);
-//                Log.e(TAG, "create new bitmap buffer capacity = " + mBmpBuffer.capacity()
-//                        + ", limit = " + mBmpBuffer.limit()
-//                        + ", bytes.length = " + mBmpBytes.length);
-//            }
-//
-//            Bitmap outputBitmap = Bitmap.createBitmap(plane.getRowStride() / plane.getPixelStride(), image.getHeight(), Bitmap.Config.ARGB_8888);
-//            outputBitmap.copyPixelsFromBuffer(plane.getBuffer());
-//            outputBitmap.copyPixelsToBuffer(mBmpBuffer);
-//
-//            mCodecInputSurface.makeCurrent();
-//            mTexRenderer.updateImage(mBmpBuffer);
-//            mTexRenderer.renderResult(false);
-//            mCodecInputSurface.setPresentationTime(image.getTimestamp());
-//            mCodecInputSurface.swapBuffers();
-//        }
-
-//        private int mSaveImageCounter = 0;
-//        private void saveBitmap(Image image) {
-//            //test save 20 images
-//            if (mSaveImageCounter > 20) return;
-//
-//
-//            String file_path = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getAbsolutePath()
-//                    + File.separator + "capture_" + mSaveImageCounter + ".png";
-//
-//            try (FileOutputStream out = new FileOutputStream(file_path)) {
-//                Image.Plane plane = image.getPlanes()[0];
-//                Bitmap outputBitmap = Bitmap.createBitmap(plane.getRowStride() / plane.getPixelStride(), image.getHeight(), Bitmap.Config.ARGB_8888);
-//                outputBitmap.copyPixelsFromBuffer(plane.getBuffer());
-//                outputBitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
-//                outputBitmap.recycle();
-////                Log.i(TAG, "image format: " + image.getFormat());
-////                Log.i(TAG, "save image: " + file_path);
-//                mSaveImageCounter++;
-//            } catch (IOException e) {
-//                e.printStackTrace();
-//                Log.e(TAG, "save bitmap failed ..." + e);
-//            }
-//        }
     }
 
 }
